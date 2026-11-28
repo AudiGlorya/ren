@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
@@ -16,6 +16,25 @@ HEADERS = {
 
 DB_PATH = os.path.join("data", "stackledger.db")
 CACHE_TTL_MINUTES = 15
+
+# East Africa Time (UTC+3) for Nairobi display timestamps
+EAT = timezone(timedelta(hours=3))
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def eat_now() -> datetime:
+    return datetime.now(EAT)
+
+
+def parse_iso_utc(ts: str) -> datetime:
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 # Step 1: Expanded verified Kenyan & East African ATS career boards
 KENYA_ATS_BOARDS = [
@@ -93,8 +112,8 @@ def get_cached_feed(query_key):
                 (query_key,),
             ).fetchone()
             if row:
-                created_at = datetime.fromisoformat(row[1])
-                if datetime.utcnow() - created_at < timedelta(minutes=CACHE_TTL_MINUTES):
+                created_at = parse_iso_utc(row[1])
+                if utc_now() - created_at < timedelta(minutes=CACHE_TTL_MINUTES):
                     payload = json.loads(row[0])
                     payload["from_cache"] = True
                     return payload
@@ -104,8 +123,9 @@ def get_cached_feed(query_key):
 
 
 def save_feed_and_snapshot(query_key, payload):
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    now_iso = datetime.utcnow().isoformat()
+    now_utc = utc_now()
+    today = eat_now().strftime("%Y-%m-%d")
+    now_iso = now_utc.isoformat()
     jobs = payload.get("jobs", [])
 
     try:
@@ -225,6 +245,7 @@ def classify_scope(location_text):
 
 def fetch_brightermonday_ke(query):
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         q_slug = quote(query) if query else ""
         url = f"https://www.brightermonday.co.ke/jobs/software-data?q={q_slug}" if q_slug else "https://www.brightermonday.co.ke/jobs/software-data"
@@ -252,7 +273,7 @@ def fetch_brightermonday_ke(query):
                                 "location": city,
                                 "scope": "Kenya (Local)",
                                 "source": "BrighterMonday KE",
-                                "posted": (item.get("datePosted") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                                "posted": (item.get("datePosted") or "")[:10] or today_eat,
                                 "salary": "",
                                 "url": item.get("url") or url,
                                 "skill_hits": hits,
@@ -277,7 +298,7 @@ def fetch_brightermonday_ke(query):
                         "location": "Nairobi, Kenya",
                         "scope": "Kenya (Local)",
                         "source": "BrighterMonday KE",
-                        "posted": datetime.now().strftime("%Y-%m-%d"),
+                        "posted": today_eat,
                         "salary": "",
                         "url": link,
                         "skill_hits": hits,
@@ -290,6 +311,7 @@ def fetch_brightermonday_ke(query):
 
 def fetch_myjobmag_ke(query):
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         url = "https://www.myjobmag.co.ke/jobs-by-field/information-technology"
         page = fetch_url(url, timeout=12)
@@ -311,7 +333,7 @@ def fetch_myjobmag_ke(query):
                     "location": "Nairobi, Kenya",
                     "scope": "Kenya (Local)",
                     "source": "MyJobMag KE",
-                    "posted": datetime.now().strftime("%Y-%m-%d"),
+                    "posted": today_eat,
                     "salary": "",
                     "url": f"https://www.myjobmag.co.ke{rel_link}",
                     "skill_hits": hits,
@@ -324,6 +346,7 @@ def fetch_myjobmag_ke(query):
 
 def fetch_jobdata_ke(query):
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         data = fetch_json("https://jobdataapi.com/api/jobs/?country_code=KE", timeout=10)
         results = data.get("results", data) if isinstance(data, dict) else data
@@ -341,7 +364,7 @@ def fetch_jobdata_ke(query):
                     "location": loc,
                     "scope": "Kenya (Local)",
                     "source": "JobData KE",
-                    "posted": str(item.get("published") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                    "posted": str(item.get("published") or "")[:10] or today_eat,
                     "salary": "",
                     "url": item.get("url") or "#",
                     "skill_hits": hits,
@@ -355,6 +378,7 @@ def fetch_jobdata_ke(query):
 def fetch_ats_board(board, query):
     ats, slug, company_name = board
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         if ats == "ashby":
             data = fetch_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}", timeout=10)
@@ -370,7 +394,7 @@ def fetch_ats_board(board, query):
                         "location": loc,
                         "scope": classify_scope(loc),
                         "source": f"{company_name} (Ashby)",
-                        "posted": (j.get("publishedAt") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                        "posted": (j.get("publishedAt") or "")[:10] or today_eat,
                         "salary": "",
                         "url": j.get("jobUrl") or j.get("applyUrl") or "#",
                         "skill_hits": hits,
@@ -390,7 +414,7 @@ def fetch_ats_board(board, query):
                         "location": loc,
                         "scope": classify_scope(loc),
                         "source": f"{company_name} (Greenhouse)",
-                        "posted": (j.get("updated_at") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                        "posted": (j.get("updated_at") or "")[:10] or today_eat,
                         "salary": "",
                         "url": j.get("absolute_url", "#"),
                         "skill_hits": hits,
@@ -410,7 +434,7 @@ def fetch_ats_board(board, query):
                         "location": loc,
                         "scope": classify_scope(loc),
                         "source": f"{company_name} (Lever)",
-                        "posted": datetime.now().strftime("%Y-%m-%d"),
+                        "posted": today_eat,
                         "salary": "",
                         "url": j.get("hostedUrl", "#"),
                         "skill_hits": hits,
@@ -423,6 +447,7 @@ def fetch_ats_board(board, query):
 
 def fetch_remotive(query):
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         q = quote(query or "software")
         data = fetch_json(f"https://remotive.com/api/remote-jobs?search={q}&limit=40", timeout=10)
@@ -439,7 +464,7 @@ def fetch_remotive(query):
                     "location": loc,
                     "scope": classify_scope(loc),
                     "source": "Remotive",
-                    "posted": (item.get("publication_date") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                    "posted": (item.get("publication_date") or "")[:10] or today_eat,
                     "salary": item.get("salary") or "",
                     "url": item.get("url", "#"),
                     "skill_hits": hits,
@@ -452,6 +477,7 @@ def fetch_remotive(query):
 
 def fetch_remoteok(query):
     jobs = []
+    today_eat = eat_now().strftime("%Y-%m-%d")
     try:
         data = fetch_json("https://remoteok.com/api", timeout=10)
         for item in data[1:]:
@@ -468,7 +494,7 @@ def fetch_remoteok(query):
                     "location": loc,
                     "scope": classify_scope(loc),
                     "source": "RemoteOK",
-                    "posted": (item.get("date") or "")[:10] or datetime.now().strftime("%Y-%m-%d"),
+                    "posted": (item.get("date") or "")[:10] or today_eat,
                     "salary": "",
                     "url": item.get("url", "#"),
                     "skill_hits": hits,
@@ -482,7 +508,7 @@ def fetch_remoteok(query):
 
 
 def fetch_github_momentum():
-    since_date = (datetime.utcnow() - timedelta(days=14)).strftime("%Y-%m-%d")
+    since_date = (utc_now() - timedelta(days=14)).strftime("%Y-%m-%d")
     languages = ["Python", "Go", "TypeScript", "JavaScript", "Rust", "Java"]
 
     def query_lang(lang):
@@ -530,9 +556,13 @@ def build_live_feed(query, force_refresh=False):
             seen.add(key)
             jobs.append(job)
 
+    now_utc = utc_now()
+    now_eat = now_utc.astimezone(EAT)
+
     payload = {
         "query": query,
-        "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "synced_at": now_eat.strftime("%Y-%m-%d %H:%M:%S EAT"),
+        "synced_at_utc": now_utc.isoformat(),
         "from_cache": False,
         "total_jobs": len(jobs),
         "jobs": jobs,
